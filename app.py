@@ -182,15 +182,14 @@ def load_data(file) -> pd.DataFrame:
 # ==================================================================================
 # 4. INTERFACE E MENU LATERAL
 # ==================================================================================
-uploaded = st.file_uploader("Carregue a planilha .xlsx ou .csv da ATI", type=["xlsx", "csv"])
-if uploaded is None:
-    default_path = Path("02. Registro de Assessoramento - Atualizado  (respostas).xlsx")
-    if default_path.exists(): uploaded = default_path
-    else:
-        st.info("Aguardando carregamento da planilha para estruturar a inteligência do painel.")
-        st.stop()
+# --- CARREGAMENTO AUTOMÁTICO E SEGURO DA BASE OFICIAL ---
+default_path = Path("02. Registro de Assessoramento - Atualizado  (respostas).xlsx")
 
-df = load_data(uploaded)
+if default_path.exists():
+    df = load_data(default_path)
+else:
+    st.error("Erro crítico: A base de dados oficial '02. Registro de Assessoramento - Atualizado  (respostas).xlsx' não foi encontrada no servidor.")
+    st.stop()
 
 with st.sidebar:
     st.header("Navegação do Sistema")
