@@ -43,12 +43,80 @@ COLS = {
     "samarco": "Essa demanda se trata de um acompanhamento de atendimento junto à Samarco?",
 }
 
+COL_ALIASES = {
+    "assessor2": ["Assessor 2", "Assessor "],
+    "assunto_coletivo": ["Assunto do Assessoramento Coletivo", "Qual é o assunto do Assessoramento Coletivo?"],
+    "assunto_demanda": [
+        "Qual é o assunto do Assessoramento de demanda espontânea?",
+        'Qual é o assunto do Assessoramento de demanda espontânea?"'
+    ],
+    "assunto_repactuacao": ["Qual é o assunto relacionado à repactuação?"],
+    "assunto_reassentamento": [
+        "Qual é o assunto do Assessoramento sobre o Reassentamento?",
+        "Assunto do Assessoramento Individual Reassentamento - Qual é o enquadramento?",
+        "Qual o enquadramento?",
+        "Qual é o assunto do Assessoramento Individual?"
+    ],
+    "modalidade_reassentamento": [
+        "Esse atendimento se refere a qual modalidade de reassentamento?",
+        "Esse atendimento se refers a qual modalidade de reassentamento?"
+    ],
+    "comunidade": ["Comunidade(s) acompanhada(s) no Assessoramento Coletivo."],
+    "meio_contato": ["Meio de contato"],
+    "observacao": ["Observação"],
+}
+
 PARTICIPANTES = ["feminino", "masculino", "criancas", "adolescentes", "jovens", "adultos", "idosos"]
 STOPWORDS_PT = ["de", "a", "o", "que", "e", "do", "da", "em", "um", "para", "com", "na", "no", "uma", "os", "as", "dos", "das", "ao", "aos", "por", "mais", "se", "foi", "atendimento", "reunião", "assessoramento", "comunidade", "relatório", "visita", "sobre", "nao", "não", "como"]
 
 # ==================================================================================
 # 2. FUNÇÕES DE AUXÍLIO / TRATAMENTO DE DADOS
 # ==================================================================================
+def read_sheet_safely(file) -> pd.DataFrame:
+    if str(file).endswith(".csv"):
+        return pd.read_csv(file)
+
+    preview = pd.read_excel(file, header=None, nrows=10)
+
+    header_row = 0
+    for i in range(len(preview)):
+        row_values = preview.iloc[i].astype(str).tolist()
+        tem_data = any(v.strip() == "Data" for v in row_values)
+        tem_tipo = any("tipo de agenda" in v.lower() for v in row_values)
+
+        if tem_data and tem_tipo:
+            header_row = i
+            break
+
+    return pd.read_excel(file, header=header_row)
+
+
+def coalesce_columns(df: pd.DataFrame, candidates: list) -> pd.Series:
+    existentes = [c for c in candidates if c in df.columns]
+
+    if not existentes:
+        return pd.Series(pd.NA, index=df.index)
+
+    resultado = df[existentes[0]]
+
+    for coluna in existentes[1:]:
+        resultado = resultado.combine_first(df[coluna])
+
+    return resultado
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).replace("_x000a_", "\n").strip() for c in df.columns]
+
+    df = df.rename(columns={v: k for k, v in COLS.items() if v in df.columns})
+
+    for key, aliases in COL_ALIASES.items():
+        if key not in df.columns:
+            df[key] = coalesce_columns(df, aliases)
+
+    return df
+
 def to_number(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s.astype(str).str.extract(r"(\d+(?:[,.]\d+)?)", expand=False).str.replace(",", ".", regex=False), errors="coerce").fillna(0)
 
@@ -81,10 +149,8 @@ def extrair_palavras_chave(series: pd.Series, top_n=15):
 # ==================================================================================
 @st.cache_data(show_spinner=False)
 def load_data(file) -> pd.DataFrame:
-    if str(file).endswith(".csv"): df = pd.read_csv(file)
-    else: df = pd.read_excel(file)
-        
-    df = df.rename(columns={v: k for k, v in COLS.items() if v in df.columns})
+    df = read_sheet_safely(file)
+    df = normalize_columns(df)
     
     colunas_padrao = {
         "tipo": "Não informado", "assessor1": "Não informado", "assessor2": "",
@@ -121,7 +187,21 @@ def load_data(file) -> pd.DataFrame:
     df["tema_principal"] = df["tema_principal"].fillna("Não informado").astype(str).str.strip()
     df["local"] = df.get("local", "Não Informado").fillna("Não Informado").astype(str).str.strip()
     df["formato"] = df.get("formato", "Não Informado").fillna("Não Informado").astype(str).str.strip()
+    df["comunidade_analise"] = df.get("comunidade", "").fillna("").astype(str).str.strip()
+    df.loc[
+        df["comunidade_analise"].isin(["", "nan", "NaN", "Não informado"]),
+        "comunidade_analise"
+    ] = df["local"]
 
+    df["genero_predominante"] = np.select(
+        [
+            df.get("feminino", 0) > df.get("masculino", 0),
+            df.get("masculino", 0) > df.get("feminino", 0),
+            (df.get("feminino", 0) > 0) & (df.get("masculino", 0) > 0)
+        ],
+        ["Feminino", "Masculino", "Misto"],
+        default="Não informado"
+)
     df["tem_encaminhamento"] = df.get("encaminhamentos", "").fillna("").astype(str).str.len() > 5
     df["tem_relatorio"] = df.get("relatorio", "").fillna("").astype(str).str.len() > 20
     df["caso_sensivel_flag"] = df.get("caso_sensivel", "").fillna("").astype(str).str.lower().str.contains("sim")
@@ -183,12 +263,23 @@ def load_data(file) -> pd.DataFrame:
 # 4. INTERFACE E MENU LATERAL
 # ==================================================================================
 # --- CARREGAMENTO AUTOMÁTICO E SEGURO DA BASE OFICIAL ---
-default_path = Path("02. Registro de Assessoramento - Atualizado  (respostas).xlsx")
+bases = [
+    Path("02. Registro de Assessoramento - antigo  (respostas).xlsx"),
+    Path("02. Registro de Assessoramento - Atualizado  (respostas).xlsx")
+]
 
-if default_path.exists():
-    df = load_data(default_path)
+dfs = []
+
+for base in bases:
+    if base.exists():
+        temp = load_data(base)
+        temp["base_origem"] = "Antiga" if "antigo" in base.name.lower() else "Atualizada"
+        dfs.append(temp)
+
+if dfs:
+    df = pd.concat(dfs, ignore_index=True)
 else:
-    st.error("Erro crítico: A base de dados oficial '02. Registro de Assessoramento - Atualizado  (respostas).xlsx' não foi encontrada no servidor.")
+    st.error("Erro crítico: nenhuma base de dados foi encontrada no servidor.")
     st.stop()
 
 with st.sidebar:
@@ -203,18 +294,87 @@ with st.sidebar:
         "🗺️ Dashboard Territorial",
         "⚠️ Dashboard Vulnerabilidades",
         "🔄 Dashboard Reincidência",
+        "📌 Análises Cruzadas para Coordenação",
         "🔮 Dashboard Previsão de Demanda"
     ])
     st.markdown("---")
     st.subheader("Filtros Globais")
-    anos = st.multiselect("Anos", sorted(df["ano"].unique()), default=sorted(df["ano"].unique()))
-    tipos = st.multiselect("Tipo de Agenda", sorted(df["tipo"].unique()), default=sorted(df["tipo"].unique()))
 
-f = df[df["ano"].isin(anos) & df["tipo"].isin(tipos)].copy()
+    data_min = df["data"].min().date()
+    data_max = df["data"].max().date()
+
+    periodo = st.date_input(
+        "Período de data",
+        value=(data_min, data_max),
+        min_value=data_min,
+        max_value=data_max
+    )
+
+    anos = st.multiselect("Anos", sorted(df["ano"].dropna().unique()), default=sorted(df["ano"].dropna().unique()))
+    tipos = st.multiselect("Tipo de atendimento", sorted(df["tipo"].dropna().unique()), default=sorted(df["tipo"].dropna().unique()))
+    assuntos = st.multiselect("Assuntos", sorted(df["tema_principal"].dropna().unique()))
+    generos = st.multiselect("Gênero", ["Feminino", "Masculino", "Misto", "Não informado"])
+    comunidades = st.multiselect("Comunidade", sorted(df["comunidade_analise"].dropna().unique()))
+    faixas = st.multiselect("Faixa etária", ["crianças", "adolescentes", "jovens", "adultos", "idosos"])
+    caso_sensivel = st.multiselect("Caso sensível", ["Sim", "Não"])
+
+f = df.copy()
+
+if isinstance(periodo, tuple) and len(periodo) == 2:
+    data_inicio, data_fim = periodo
+    f = f[
+        (f["data"].dt.date >= data_inicio) &
+        (f["data"].dt.date <= data_fim)
+    ]
+
+if anos:
+    f = f[f["ano"].isin(anos)]
+
+if tipos:
+    f = f[f["tipo"].isin(tipos)]
+
+if assuntos:
+    f = f[f["tema_principal"].isin(assuntos)]
+
+if generos:
+    f = f[f["genero_predominante"].isin(generos)]
+
+if comunidades:
+    f = f[f["comunidade_analise"].isin(comunidades)]
+
+if faixas:
+    colunas_faixa = {
+        "crianças": "criancas",
+        "adolescentes": "adolescentes",
+        "jovens": "jovens",
+        "adultos": "adultos",
+        "idosos": "idosos"
+    }
+
+    cols_filtradas = [colunas_faixa[x] for x in faixas if colunas_faixa[x] in f.columns]
+
+    if cols_filtradas:
+        f = f[f[cols_filtradas].sum(axis=1) > 0]
+
+if caso_sensivel:
+    mapa_caso = {"Sim": True, "Não": False}
+    f = f[f["caso_sensivel_flag"].isin([mapa_caso[x] for x in caso_sensivel])]
+
 if f.empty:
     st.warning("Nenhum dado encontrado para os filtros selecionados.")
     st.stop()
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("Exportação")
+
+csv_filtrado = f.to_csv(index=False).encode("utf-8-sig")
+
+st.sidebar.download_button(
+    label="Baixar base filtrada",
+    data=csv_filtrado,
+    file_name="base_filtrada_assessoramento.csv",
+    mime="text/csv"
+)
 # ==================================================================================
 # 5. CONSTRUTOR DE PÁGINAS (DASHBOARDS)
 # ==================================================================================
@@ -277,7 +437,10 @@ elif menu == "📊 Dashboard Executivo":
     c2.metric("Total de Atendimentos", f.shape[0])
     c3.metric("Público Feminino Atendido", f"{total_fem}", delta=f"{p_fem}% do total")
     c4.metric("Público Masculino Atendido", f"{total_masc}", delta=f"{p_masc}% do total")
-    
+    st.caption(
+    f"Período analisado: {f['data'].min().strftime('%d/%m/%Y')} até {f['data'].max().strftime('%d/%m/%Y')} | "
+    f"Registros filtrados: {f.shape[0]}"
+)
     st.markdown("---")
     col_exec1, col_exec2 = st.columns(2)
     
@@ -492,7 +655,272 @@ elif menu == "🔄 Dashboard Reincidência":
     st.write("**Alertas de Repetição Crônica de Demandas no Mesmo Território:**")
     st.dataframe(reincidencia_grupo.head(15), use_container_width=True, hide_index=True)
 
-# --- 5.10. DASHBOARD PREVISÃO DE DEMANDA ---
+
+# --- 5.10. ANÁLISES CRUZADAS PARA COORDENAÇÃO ---
+elif menu == "📌 Análises Cruzadas para Coordenação":
+    st.header("📌 Análises Cruzadas para Coordenação")
+    st.caption("Leituras estratégicas criadas a partir dos novos filtros: período, comunidade, assunto, gênero, faixa etária e casos sensíveis.")
+    comunidade_mais_atendida = f["comunidade_analise"].value_counts().idxmax() if "comunidade_analise" in f.columns and not f["comunidade_analise"].dropna().empty else "Não informado"
+    assunto_mais_frequente = f["tema_principal"].value_counts().idxmax() if not f["tema_principal"].dropna().empty else "Não informado"
+    tipo_mais_frequente = f["tipo"].value_counts().idxmax() if not f["tipo"].dropna().empty else "Não informado"
+    total_casos_sensiveis = int(f["caso_sensivel_flag"].sum()) if "caso_sensivel_flag" in f.columns else 0
+
+    st.info(
+        f"No período filtrado, foram registrados {f.shape[0]} atendimentos. "
+        f"A comunidade com maior volume foi {comunidade_mais_atendida}. "
+        f"O assunto mais frequente foi {assunto_mais_frequente}. "
+        f"O tipo de atendimento mais recorrente foi {tipo_mais_frequente}. "
+        f"Foram identificados {total_casos_sensiveis} casos sensíveis."
+    )
+    st.markdown("---")
+    st.subheader("1. Perfil do público atendido")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        perfil_faixa = pd.DataFrame({
+            "Faixa etária": ["Crianças", "Adolescentes", "Jovens", "Adultos", "Idosos"],
+            "Participantes": [
+                f["criancas"].sum() if "criancas" in f.columns else 0,
+                f["adolescentes"].sum() if "adolescentes" in f.columns else 0,
+                f["jovens"].sum() if "jovens" in f.columns else 0,
+                f["adultos"].sum() if "adultos" in f.columns else 0,
+                f["idosos"].sum() if "idosos" in f.columns else 0,
+            ]
+        })
+
+        perfil_faixa = perfil_faixa[perfil_faixa["Participantes"] > 0]
+
+        if not perfil_faixa.empty:
+            st.plotly_chart(
+                px.bar(
+                    perfil_faixa,
+                    x="Participantes",
+                    y="Faixa etária",
+                    orientation="h",
+                    title="Participantes por faixa etária",
+                    text_auto=True
+                ),
+                use_container_width=True
+            )
+        else:
+            st.info("Não há dados de faixa etária para os filtros selecionados.")
+
+    with col2:
+        perfil_genero = pd.DataFrame({
+            "Gênero": ["Feminino", "Masculino"],
+            "Participantes": [
+                f["feminino"].sum() if "feminino" in f.columns else 0,
+                f["masculino"].sum() if "masculino" in f.columns else 0,
+            ]
+        })
+
+        perfil_genero = perfil_genero[perfil_genero["Participantes"] > 0]
+
+        if not perfil_genero.empty:
+            st.plotly_chart(
+                px.pie(
+                    perfil_genero,
+                    values="Participantes",
+                    names="Gênero",
+                    title="Distribuição por gênero"
+                ),
+                use_container_width=True
+            )
+        else:
+            st.info("Não há dados de gênero para os filtros selecionados.")
+
+    st.markdown("---")
+    st.subheader("2. Assuntos mais recorrentes por comunidade")
+
+    comunidade_col = "comunidade_analise" if "comunidade_analise" in f.columns else "local"
+
+    matriz_assuntos = (
+        f.groupby([comunidade_col, "tema_principal"])
+        .size()
+        .reset_index(name="Atendimentos")
+        .sort_values("Atendimentos", ascending=False)
+    )
+
+    if not matriz_assuntos.empty:
+        top_matriz = matriz_assuntos.head(20)
+
+        st.plotly_chart(
+            px.bar(
+                top_matriz,
+                x="Atendimentos",
+                y="tema_principal",
+                color=comunidade_col,
+                orientation="h",
+                title="Top assuntos por comunidade",
+                text_auto=True
+            ),
+            use_container_width=True
+        )
+
+        st.dataframe(
+            matriz_assuntos,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("Não há dados suficientes para cruzar assunto e comunidade.")
+
+    st.markdown("---")
+    st.subheader("Ranking de comunidades por volume de atendimento")
+
+    ranking_comunidades = (
+        f.groupby(comunidade_col)
+        .size()
+        .reset_index(name="Atendimentos")
+        .sort_values("Atendimentos", ascending=False)
+        .head(15)
+    )
+
+    if not ranking_comunidades.empty:
+        st.plotly_chart(
+            px.bar(
+                ranking_comunidades,
+                x="Atendimentos",
+                y=comunidade_col,
+                orientation="h",
+                title="Comunidades com maior volume de atendimento",
+                text_auto=True
+            ),
+            use_container_width=True
+        )
+    else:
+        st.info("Não há dados suficientes para gerar o ranking de comunidades.")
+
+
+    st.markdown("---")
+    st.subheader("3. Casos sensíveis por período e comunidade")
+
+    casos_sensiveis = f[f["caso_sensivel_flag"] == True].copy()
+
+    if not casos_sensiveis.empty:
+        col_sens1, col_sens2 = st.columns(2)
+
+        with col_sens1:
+            sensivel_mes = (
+                casos_sensiveis.groupby("ano_mes")
+                .size()
+                .reset_index(name="Casos sensíveis")
+                .sort_values("ano_mes")
+            )
+
+            st.plotly_chart(
+                px.line(
+                    sensivel_mes,
+                    x="ano_mes",
+                    y="Casos sensíveis",
+                    markers=True,
+                    title="Evolução de casos sensíveis por período"
+                ),
+                use_container_width=True
+            )
+
+        with col_sens2:
+            sensivel_comunidade = (
+                casos_sensiveis.groupby(comunidade_col)
+                .size()
+                .reset_index(name="Casos sensíveis")
+                .sort_values("Casos sensíveis", ascending=False)
+                .head(10)
+            )
+
+            st.plotly_chart(
+                px.bar(
+                    sensivel_comunidade,
+                    x="Casos sensíveis",
+                    y=comunidade_col,
+                    orientation="h",
+                    title="Comunidades com mais casos sensíveis",
+                    text_auto=True
+                ),
+                use_container_width=True
+            )
+
+        st.dataframe(
+            casos_sensiveis[["data", comunidade_col, "tipo", "tema_principal", "assessor1"]].sort_values("data", ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.success("Nenhum caso sensível encontrado para os filtros selecionados.")
+
+    st.markdown("---")
+    st.subheader("4. Tipo de atendimento por assunto")
+
+    matriz_tipo_assunto = pd.crosstab(f["tema_principal"], f["tipo"])
+
+    if not matriz_tipo_assunto.empty:
+        st.dataframe(
+            matriz_tipo_assunto.style.background_gradient(cmap="Blues"),
+            use_container_width=True
+        )
+    else:
+        st.info("Não há dados suficientes para cruzar tipo de atendimento e assunto.")
+
+    st.markdown("---")
+    st.subheader("5. Comparativo entre base antiga e base atualizada")
+
+    if "base_origem" in f.columns:
+        comparativo_base = (
+            f.groupby("base_origem")
+            .agg(
+                atendimentos=("tipo", "size"),
+                participantes=("total_participantes", "sum"),
+                casos_sensiveis=("caso_sensivel_flag", "sum"),
+                media_complexidade=("ind_complexidade", "mean")
+            )
+            .reset_index()
+        )
+
+        st.dataframe(
+            comparativo_base.style.format({
+                "participantes": "{:.0f}",
+                "casos_sensiveis": "{:.0f}",
+                "media_complexidade": "{:.1f}"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.plotly_chart(
+            px.bar(
+                comparativo_base,
+                x="base_origem",
+                y="atendimentos",
+                title="Atendimentos por origem da base",
+                text_auto=True
+            ),
+            use_container_width=True
+        )
+        top_assuntos_origem = (
+            f.groupby(["base_origem", "tema_principal"])
+            .size()
+            .reset_index(name="Atendimentos")
+            .sort_values("Atendimentos", ascending=False)
+        )
+
+        if not top_assuntos_origem.empty:
+            st.plotly_chart(
+                px.bar(
+                    top_assuntos_origem.head(20),
+                    x="Atendimentos",
+                    y="tema_principal",
+                    color="base_origem",
+                    orientation="h",
+                    title="Assuntos mais frequentes por origem da base",
+                    text_auto=True
+                ),
+                use_container_width=True
+            )
+    else:
+        st.info("A coluna base_origem ainda não está disponível na base carregada.")
+
+# --- 5.11. DASHBOARD PREVISÃO DE DEMANDA ---
 elif menu == "🔮 Dashboard Previsão de Demanda":
     st.header("🔮 Previsão de Demanda Técnica")
 
