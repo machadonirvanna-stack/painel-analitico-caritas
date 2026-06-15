@@ -79,9 +79,11 @@ def read_sheet_safely(file) -> pd.DataFrame:
     preview = pd.read_excel(file, header=None, nrows=10)
 
     header_row = 0
+
     for i in range(len(preview)):
-        row_values = preview.iloc[i].astype(str).tolist()
-        tem_data = any(v.strip() == "Data" for v in row_values)
+        row_values = [str(v).strip() for v in preview.iloc[i].tolist()]
+
+        tem_data = any(v == "Data" for v in row_values)
         tem_tipo = any("tipo de agenda" in v.lower() for v in row_values)
 
         if tem_data and tem_tipo:
