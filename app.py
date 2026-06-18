@@ -3075,19 +3075,20 @@ elif menu == "📆 Séries Históricas Anuais":
             )
 
 # --- 5.11.2. INDICADORES DE VARIAÇÃO ---
+# --- 5.11.2. TENDÊNCIAS E PROJEÇÕES ---
 elif menu == "📈 Tendências e Projeções":
-    st.header("Tendências e Projeções")
+    st.header("📈 Tendências e Projeções")
 
     st.caption(
         "Compara variações recentes, identifica temas emergentes e projeta a demanda dos próximos meses."
     )
 
     aba_resumo, aba_variacao, aba_temas, aba_projecao, aba_insights = st.tabs([
-        "Resumo",
-        "Variações",
-        "Temas Emergentes",
-        "Projeção",
-        "Insights"
+        "📌 Resumo",
+        "📈 Variações",
+        "🚨 Temas Emergentes",
+        "🔮 Projeção",
+        "💡 Insights"
     ])
 
     var_mes = calcular_variacao_periodo(f, meses_janela=1)
@@ -3251,24 +3252,58 @@ elif menu == "📈 Tendências e Projeções":
         if not riscos.empty:
             riscos_exibir = riscos.rename(columns={
                 "tema_principal": "Tema",
-                "periodo_atual": "Últimos 3 meses",
-                "periodo_anterior": "3 meses anteriores",
-                "crescimento_abs": "Crescimento absoluto",
-                "crescimento_pct": "Crescimento percentual"
-            })
+                "periodo_atual": "Período atual",
+                "periodo_anterior": "Período anterior",
+                "crescimento_abs": "Novos registros",
+                "crescimento_pct": "Crescimento"
+            }).copy()
+
+            riscos_exibir["Período atual"] = (
+                riscos_exibir["Período atual"]
+                .fillna(0)
+                .round(0)
+                .astype(int)
+            )
+
+            riscos_exibir["Período anterior"] = (
+                riscos_exibir["Período anterior"]
+                .fillna(0)
+                .round(0)
+                .astype(int)
+            )
+
+            riscos_exibir["Novos registros"] = (
+                riscos_exibir["Novos registros"]
+                .fillna(0)
+                .round(0)
+                .astype(int)
+            )
+
+            riscos_exibir["Crescimento"] = riscos_exibir.apply(
+                lambda row: "Novo tema"
+                if row["Período anterior"] == 0
+                else f"{row['Crescimento']:.1f}%",
+                axis=1
+            )
+
+            riscos_exibir["Novos registros"] = riscos_exibir["Novos registros"].apply(
+                lambda valor: f"+{valor}" if valor > 0 else str(valor)
+            )
+
+            st.caption(
+                "Período atual corresponde aos últimos 3 meses. Período anterior corresponde aos 3 meses imediatamente anteriores."
+            )
 
             st.dataframe(
-                riscos_exibir.style.format({
-                    "Crescimento percentual": "{:.1f}%"
-                }),
+                riscos_exibir,
                 use_container_width=True,
                 hide_index=True
             )
 
             st.warning(
                 "Leitura: esses temas merecem atenção porque cresceram no período recente. "
-                "Quando o crescimento percentual estiver vazio, significa que o tema apareceu agora "
-                "ou não tinha base anterior."
+                "Quando aparece 'Novo tema', significa que o tema surgiu nos últimos 3 meses "
+                "e não tinha registros no período anterior."
             )
 
         else:
@@ -3359,7 +3394,6 @@ elif menu == "📈 Tendências e Projeções":
             st.info(
                 "Ainda não há histórico suficiente para gerar insights preditivos com segurança."
             )
-
 # --- 5.11.3. METAS E RELATORIO EXECUTIVO---
 elif menu == "🎯 Metas e Relatório Executivo":
     st.header("Metas e Relatório Executivo")
